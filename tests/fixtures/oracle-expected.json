@@ -1,0 +1,67 @@
+{
+  "totals": {
+    "views": 49200,
+    "upvotes": 2630,
+    "collects": 2130,
+    "comments": 414,
+    "interactions": 5174
+  },
+  "weightedEngagementRate": "10.52%",
+  "spanDays": 5,
+  "earliestDate": "2026-11-16",
+  "latestDate": "2026-11-21",
+  "engagementSpreadPp": "5.48",
+  "items": [
+    {
+      "title": "打工人一周减脂餐，花费不到 100 块",
+      "views": 18200,
+      "upvotes": 1240,
+      "collects": 980,
+      "comments": 156,
+      "upvoteRate": "6.81%",
+      "collectRate": "5.38%",
+      "commentRate": "0.86%",
+      "engagementRate": "13.05%",
+      "collectUpvoteRatio": "0.79"
+    },
+    {
+      "title": "宿舍党 5 分钟快手早餐，3 样食材搞定",
+      "views": 9600,
+      "upvotes": 410,
+      "collects": 720,
+      "comments": 48,
+      "upvoteRate": "4.27%",
+      "collectRate": "7.50%",
+      "commentRate": "0.50%",
+      "engagementRate": "12.27%",
+      "collectUpvoteRatio": "1.76"
+    },
+    {
+      "title": "我试了 7 天轻断食，真实记录来了",
+      "views": 21400,
+      "upvotes": 980,
+      "collects": 430,
+      "comments": 210,
+      "upvoteRate": "4.58%",
+      "collectRate": "2.01%",
+      "commentRate": "0.98%",
+      "engagementRate": "7.57%",
+      "collectUpvoteRatio": "0.44"
+    }
+  ],
+  "rankedEngagementRates": [
+    "13.05%",
+    "12.27%",
+    "7.57%"
+  ],
+  "rankedCollectUpvoteRatios": [
+    "0.79",
+    "1.76",
+    "0.44"
+  ],
+  "differentialCaseCounts": {
+    "rates": 247030,
+    "numbers": 100000,
+    "total": 347030
+  }
+}
