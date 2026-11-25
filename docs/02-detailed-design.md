@@ -992,3 +992,56 @@ flowchart TD
 | AI 设计（A′） | 通过 | §7 覆盖预生成示例 + BYOK 端点、发送白名单、告知文案、提示词、6 类错误、数字核验与人工验证规程 |
 | 测试计划 | 通过 | §8 一一对应阶段三、四全部验收标准 |
 | 未开始实现 | 通过 | 仅产出 `docs/02-detailed-design.md`，未创建任何源码文件 |
+
+---
+
+## 10. Stage 3 follow-up: AI sample generation, custom providers, connectivity test
+
+> 本节为阶段三完成后的增量设计补充（对应需求 R1–R5），不改变确定性计算引擎口径与任何原创性/安全红线。
+
+### 10.1 示例报告实时 AI 生成与自动回退（R1，D2 A′ 扩展）
+
+- **交互入口**：在内置示例报告（`report.meta.isSample === true`）的顶部操作条与“AI 深度语义诊断”面板均提供 **`重新生成 AI 诊断`** 按钮；生成确定性报告本身仍为毫秒级本地计算，永不被 AI 阻塞。
+- **执行与回退逻辑（`src/ai/client.js` → `generateSampleAiWithFallback`）**：
+  1. **未配置 Key**：不发起网络请求，立即回退至 `SAMPLE_AI_DIAGNOSIS` 并展示明确提示（`未配置 Key（当前服务商：…），已自动回退展示预先生成的示例 AI 诊断`），附快捷链接跳转“设置与备份”。
+  2. **已配置 Key**：先弹出数据发送告知确认框（符合隐私边界），确认后调用 `requestLiveAiDiagnosis`（仍执行 `verifier.js` 确定性数字核验，防幻觉）；成功则切换为实时模式并标注 `实时 AI 诊断 · <服务商>`。
+  3. **超时或失败回退**：若触发 `TIMEOUT`（30 秒）或既有 6 类标准错误（`AUTH_INVALID` / `QUOTA_EXCEEDED` / `MODEL_NOT_FOUND` / `TIMEOUT` / `CORS_OR_NETWORK` / `PARSE_ERROR`）中任意一类，自动回退展示 `SAMPLE_AI_DIAGNOSIS`，并在面板顶部以显著警示框写明**具体回退原因（中文错误文案）**及**当前展示为预先生成示例**；导出 Markdown 同步保留该回退提示行。
+
+### 10.2 内置服务商扩展（R3）与自定义 OpenAI 兼容服务商（R2）
+
+- **8 家内置服务商（`src/ai/providers.js`）**：
+
+| `providerId` | 显示名称 | Base URL | 默认模型 | 初始浏览器直连状态 |
+|---|---|---|---|---|
+| `deepseek` | DeepSeek（推荐） | `https://api.deepseek.com/v1` | `deepseek-chat` | `preflight_passed`（CORS 预检已放行） |
+| `moonshot` | Moonshot（Kimi） | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | `preflight_passed`（CORS 预检已放行） |
+| `dashscope` | 通义千问 DashScope 兼容 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | `preflight_passed`（CORS 预检已放行） |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `preflight_passed`（CORS 预检已放行） |
+| `zhipu` | 智谱 AI（BigModel） | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` | `unverified`（**待验证**） |
+| `doubao` | 豆包（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-1-5-pro-32k-250115` | `unverified`（**待验证**） |
+| `siliconflow` | 硅基流动（SiliconFlow） | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-7B-Instruct` | `unverified`（**待验证**） |
+| `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` | `unverified`（**待验证**） |
+
+- **“待验证”原则**：代码与界面均不对新增 4 家或用户自定义服务商提前断言浏览器直连可用，统一标注为“待验证”；仅当用户通过 R4 连通性测试实测通过后，界面状态徽标才切换为“已通过连通性测试”。
+- **自定义服务商（R2）**：
+  - 在设置页提供“添加自定义 OpenAI 兼容服务商”表单：显示名称、Base URL（经 `validateCustomProviderInput` 严格校验为 `https://`、拒绝明文 `http://`/URL 内嵌凭证/查询串/锚点及 `/chat/completions` 后缀，自动规范化末尾斜杠）、默认模型 ID 及可选 API Key。
+  - 元数据（不含 Key）持久化于 `Settings.customProviders`；各服务商 API Key 独立存储于 `sessionStorage`（`zhihu_review_ai_provider_keys_v1`），仅在用户勾选“记住 Key 到本地浏览器”时同步写入 `localStorage`（`zhihu_review_ai_provider_keys_persisted_v1`），JSON 备份绝不包含任何 Key。
+  - 自定义服务商与内置服务商共用同一套 `AiProviderConfig` 接口，完整支持实时诊断、R1 示例重新生成与 R4 连通性测试。
+- **CSP 调整**：`index.html` 的 `connect-src` 调整为 `'self' https:`，既放行新增服务商与用户自定义 HTTPS 端点，仍严格禁止非加密 `http://` 外连与第三方脚本加载。
+
+### 10.3 按服务商轻量连通性测试（R4）
+
+- **入口**：在“设置与备份”页（当前选用服务商操作区 + 全部服务商列表每行按钮）以及报告页“AI 深度语义诊断”面板均提供 **`测试连通性`** 按钮。
+- **探测策略（`src/ai/client.js` → `testProviderConnectivity`，15 秒超时）**：
+  1. 优先携带 `Authorization: Bearer <key>` 发起 `GET {baseUrl}/models`；若 HTTP 2xx 且响应体为合法 JSON 对象，判定成功并记录毫秒耗时（`method: 'models'`）。
+  2. 若 `/models` 返回 `400 / 404 / 405 / 422 / 501`（非额度错误）或 200 非 JSON 响应，自动回退为最小化 `POST {baseUrl}/chat/completions`（`max_tokens: 1`, `temperature: 0`）；返回合法 `choices` 即判定成功并记录毫秒耗时（`method: 'chat_fallback'`）。
+  3. 鉴权失败（401/403）、额度耗尽（429/`quota`）、模型不存在（404）、超时、网络/CORS 拦截与返回解析失败均映射到既有 6 类中文错误分类。
+- **结果持久化**：每次测试结果（`{ ok, method, latencyMs, testedAtUtcMs, errorCode, message }`，不含 Key）按 `providerId` 持久化在 `Settings.connectivityResults` 中，跨刷新保留上次测试时间与结论。
+
+### 10.4 完备性审计修复项（R5）
+
+在对照 `BRIEF.md`、`docs/01` §10 及 `docs/02` §8.5 的代码级审计中，一并补齐了以下缺口：
+1. `src/core/parser.js`：解析器忽略非评论区内的 `#` 注释行，使复制本工具生成的“下次复盘粘贴块”（含 `# 备注：上次复盘数据龄…`）直接回粘时不再产生多余的未识别字段提示。
+2. `src/core/validator.js`：增加同批次规范化标题查重提示（`DUPLICATE_TITLE`），满足边界与异常清单对“重复标题”可见中文提示的要求。
+3. `src/core/report.js` 与 `src/ui/report-view.js`：将诊断引擎已计算的 `categoryReferenceNote`（同类型历史中位参考，历史同类型 ≥ 5 篇时触发）真正输出至报告界面与 Markdown 导出；移动端紧凑总览卡片同步补齐小样本/数据龄/回答类型微标签。
+4. `src/main.js`：JSON 备份导出在浏览器拦截直接下载（如微信/移动端内置浏览器）时，自动回落至手动全选复制弹窗兜底，与 Markdown 导出体验保持一致。

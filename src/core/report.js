@@ -71,28 +71,32 @@ export function buildReportModel(metrics, diagnosis, meta) {
 
   const diagByBlock = new Map(diagnosis.perAnswer.map((d) => [d.blockIndex, d]));
 
-  const overviewRows = metrics.items.map((m) => ({
-    blockIndex: m.raw.blockIndex,
-    title: m.raw.title,
-    publishedRaw: m.raw.publishedRaw,
-    ageDays: m.ageDays,
-    ageText: m.ageDays !== null ? `${m.ageDays} 天` : '—',
-    views: m.raw.views,
-    upvotes: m.raw.upvotes,
-    collects: m.raw.collects,
-    comments: m.raw.comments,
-    endorseLikes: m.raw.endorseLikes,
-    shares: m.raw.shares,
-    categoryTag: m.raw.categoryTag,
-    upvoteRate: formatPercent(m.upvoteRate),
-    collectRate: formatPercent(m.collectRate),
-    commentRate: formatPercent(m.commentRate),
-    engagementRate: formatPercent(m.engagementRate),
-    collectUpvoteRatio: formatFixedHalfEven(m.collectUpvoteRatio, 2),
-    isSmallSample: m.isSmallSample,
-    isImmature: m.isImmature,
-    rank: m.rank,
-  }));
+  const overviewRows = metrics.items.map((m) => {
+    const diag = diagByBlock.get(m.raw.blockIndex);
+    return {
+      blockIndex: m.raw.blockIndex,
+      title: m.raw.title,
+      publishedRaw: m.raw.publishedRaw,
+      ageDays: m.ageDays,
+      ageText: m.ageDays !== null ? `${m.ageDays} 天` : '—',
+      views: m.raw.views,
+      upvotes: m.raw.upvotes,
+      collects: m.raw.collects,
+      comments: m.raw.comments,
+      endorseLikes: m.raw.endorseLikes,
+      shares: m.raw.shares,
+      categoryTag: m.raw.categoryTag,
+      categoryReferenceNote: diag?.categoryReferenceNote ?? null,
+      upvoteRate: formatPercent(m.upvoteRate),
+      collectRate: formatPercent(m.collectRate),
+      commentRate: formatPercent(m.commentRate),
+      engagementRate: formatPercent(m.engagementRate),
+      collectUpvoteRatio: formatFixedHalfEven(m.collectUpvoteRatio, 2),
+      isSmallSample: m.isSmallSample,
+      isImmature: m.isImmature,
+      rank: m.rank,
+    };
+  });
 
   const rankingItems = diagnosis.canRank
     ? metrics.ranked.map((m) => {
@@ -279,6 +283,16 @@ export function serializeReportToMarkdown(model) {
       out.push(`- ${w}`);
     }
   }
+  const categoryRefNotes = overviewRows
+    .filter((r) => Boolean(r.categoryReferenceNote))
+    .map((r) => `《${r.title}》：${r.categoryReferenceNote}`);
+  if (categoryRefNotes.length > 0) {
+    out.push('');
+    out.push('**同类型历史中位参考**：');
+    for (const note of categoryRefNotes) {
+      out.push(`- ${note}`);
+    }
+  }
   out.push('');
 
   // 互动率梯队排名
@@ -389,6 +403,9 @@ export function serializeReportToMarkdown(model) {
     out.push('## AI 深度语义诊断');
     out.push('');
     out.push(`> ${model.aiSection.disclaimer}`);
+    if (model.aiSection.fallbackNotice) {
+      out.push(`> ℹ️ ${model.aiSection.fallbackNotice}`);
+    }
     if (model.aiSection.verification.hasUnverified) {
       out.push(
         `> ⚠️ 检测到 AI 输出包含 ${model.aiSection.verification.unverifiedCount} 处未在计算结果中核验到的数字（${model.aiSection.verification.unverifiedTokens.join('、')}），请以确定性总览表为准。`,

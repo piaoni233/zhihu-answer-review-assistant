@@ -229,6 +229,9 @@ export function parseInputBlocks(rawText, options = {}) {
       const stripped = text.trim();
 
       if (!inCommentSection) {
+        if (stripped.startsWith('#')) {
+          continue;
+        }
         const cm = COMMENT_SECTION_RE.exec(stripped);
         if (cm) {
           inCommentSection = true;

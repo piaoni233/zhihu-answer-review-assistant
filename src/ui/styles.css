@@ -901,7 +901,67 @@ body {
   color: var(--red);
 }
 
-/* AI 面板 */
+/* AI 面板与服务商连通性 */
+.ai-panel-controls {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.ai-provider-summary {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.ai-provider-summary .badge-row {
+  margin-bottom: 4px;
+}
+
+.connectivity-meta {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.small-alert {
+  margin-top: 6px;
+  padding: 8px 12px;
+}
+
+.provider-table-wrap {
+  margin-top: 10px;
+}
+
+.provider-name-cell {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.provider-row-active {
+  background: var(--primary-soft);
+}
+
+.provider-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.custom-provider-card .settings-actions {
+  margin-top: 12px;
+}
+
 .ai-loading-bar {
   display: flex;
   align-items: center;

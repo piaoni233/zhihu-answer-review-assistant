@@ -1,6 +1,7 @@
 // @ts-check
 
 import { formatUtcMinute } from './date.js';
+import { normalizeTitle } from './parser.js';
 
 /**
  * 批量校验器：阻断错误、软警示（互动 > 阅读）、不足 3 篇状态降级、截至时间早于发布时间。
@@ -41,10 +42,30 @@ export function validateBatch(parseResult, _settings, asOfUtcMs = null) {
   }
 
   const asOfDisplay = asOfUtcMs !== null ? formatUtcMinute(asOfUtcMs) : '';
+  /** @type {Map<string, number>} */
+  const seenNormalizedTitles = new Map();
 
   for (const item of parseResult.items) {
     const viewsLine = item.fieldLines?.views ?? item.startLine;
     const pubLine = item.fieldLines?.published ?? item.startLine;
+
+    const normTitle = normalizeTitle(item.title);
+    if (normTitle) {
+      const firstBlock = seenNormalizedTitles.get(normTitle);
+      if (firstBlock !== undefined) {
+        notices.push({
+          severity: 'notice',
+          code: 'DUPLICATE_TITLE',
+          blockIndex: item.blockIndex,
+          startLine: item.startLine,
+          line: item.fieldLines?.title ?? item.startLine,
+          message: `第 ${item.blockIndex} 篇《${item.title}》与第 ${firstBlock} 篇问题标题重复，请核对是否重复粘贴同一回答（重复篇目仍会参与本批合计）。`,
+          fixHint: '若为误粘重复块请删除多余一篇；若确为同问题下两篇不同回答可忽略此提示。',
+        });
+      } else {
+        seenNormalizedTitles.set(normTitle, item.blockIndex);
+      }
+    }
 
     if (item.views === 0) {
       blockingErrors.push({

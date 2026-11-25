@@ -5,10 +5,12 @@ import { buildAiMessages, buildSanitizedAiPayload } from './prompt.js';
 import { verifyAiOutputNumbers } from './verifier.js';
 
 /**
- * OpenAI 兼容直连客户端、30 秒 AbortController 超时与 6 类中文错误分类（详细设计 §7.4）
+ * OpenAI 兼容直连客户端、30 秒 AbortController 超时、6 类中文错误分类、
+ * 示例报告实时生成与自动回退（R1）以及轻量连通性测试（R4）。
  */
 
 export const AI_TIMEOUT_MS = 30_000;
+export const CONNECTIVITY_TIMEOUT_MS = 15_000;
 
 /**
  * @typedef {'AUTH_INVALID'|'QUOTA_EXCEEDED'|'MODEL_NOT_FOUND'|'TIMEOUT'|'CORS_OR_NETWORK'|'PARSE_ERROR'} AiErrorCode
@@ -21,8 +23,18 @@ export const AI_ERROR_MESSAGES = {
   MODEL_NOT_FOUND: '所选模型名称不受该服务商支持，请在设置中确认模型 ID（如 deepseek-chat）。',
   TIMEOUT: '请求大模型接口超时（30 秒），建议检查网络后重试；此超时不影响基础复盘报告使用。',
   CORS_OR_NETWORK:
-    '无法直连大模型接口：可能是当前网络不可达，或浏览器拦截了跨域请求（请优先使用已验证支持浏览器的 DeepSeek / Moonshot / 通义接口）。',
+    '无法直连大模型接口：可能是当前网络不可达，或浏览器拦截了跨域请求（请先使用“测试连通性”检查，或选用已通过 CORS 预检的服务商）。',
   PARSE_ERROR: '模型返回格式不符合预期，无法结构化展示；可重试一次或切换更稳定的模型。',
+};
+
+/** @type {Record<AiErrorCode, string>} */
+export const AI_ERROR_SHORT_LABELS = {
+  AUTH_INVALID: 'API Key 无效或无权限',
+  QUOTA_EXCEEDED: '额度耗尽或触发限流',
+  MODEL_NOT_FOUND: '模型不可用',
+  TIMEOUT: '请求超时',
+  CORS_OR_NETWORK: '网络不可达或跨域受阻',
+  PARSE_ERROR: '返回格式异常',
 };
 
 export class AiClientError extends Error {
@@ -109,11 +121,24 @@ export function parseAiJsonResponse(rawContent) {
 
 /**
  * 发起 BYOK 浏览器直连实时 AI 诊断，并执行确定性数字核验。
- * @param {{providerId:string, model?:string, apiKey:string, metrics:import('../types.js').BatchMetrics, diagnosis:import('../types.js').DiagnosisResult, fetchImpl?:typeof fetch, signal?:AbortSignal, timeoutMs?:number}} params
+ * 同时支持内置服务商与自定义 HTTPS 服务商。
+ * @param {{
+ *   provider?: import('./providers.js').AiProviderConfig,
+ *   providerId?: string,
+ *   customProviders?: import('../types.js').CustomAiProvider[],
+ *   model?: string,
+ *   apiKey: string,
+ *   metrics: import('../types.js').BatchMetrics,
+ *   diagnosis: import('../types.js').DiagnosisResult,
+ *   fetchImpl?: typeof fetch,
+ *   signal?: AbortSignal,
+ *   timeoutMs?: number
+ * }} params
  * @returns {Promise<import('../types.js').AiDiagnosisResult>}
  */
 export async function requestLiveAiDiagnosis(params) {
-  const provider = getProviderById(params.providerId);
+  const provider =
+    params.provider || getProviderById(params.providerId || 'deepseek', params.customProviders || []);
   const model = (params.model || provider.defaultModel).trim();
   const apiKey = (params.apiKey || '').trim();
   const fetchFn = params.fetchImpl ?? globalThis.fetch;
@@ -190,6 +215,7 @@ export async function requestLiveAiDiagnosis(params) {
       commentReinterpretation: structured.commentReinterpretation,
       rewriteSuggestions: structured.rewriteSuggestions,
       verification,
+      fallbackNotice: null,
     };
   } catch (err) {
     if (err instanceof AiClientError) {
@@ -202,6 +228,286 @@ export async function requestLiveAiDiagnosis(params) {
       throw err;
     }
     throw new AiClientError('CORS_OR_NETWORK', err instanceof Error ? err.message : String(err));
+  } finally {
+    clearTimeout(timer);
+    if (params.signal) {
+      params.signal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
+/**
+ * R1：内置示例报告的“重新生成 AI 诊断”——尝试实时调用，
+ * 若未配置 Key、请求超时或触发任意 6 类错误，则自动回退到预生成示例诊断并返回明确回退原因说明。
+ * 确定性报告永远不被 AI 阻塞。
+ *
+ * @param {{
+ *   provider?: import('./providers.js').AiProviderConfig,
+ *   providerId?: string,
+ *   customProviders?: import('../types.js').CustomAiProvider[],
+ *   model?: string,
+ *   apiKey: string,
+ *   metrics: import('../types.js').BatchMetrics,
+ *   diagnosis: import('../types.js').DiagnosisResult,
+ *   fallbackDiagnosis: import('../types.js').AiDiagnosisResult,
+ *   fetchImpl?: typeof fetch,
+ *   signal?: AbortSignal,
+ *   timeoutMs?: number
+ * }} params
+ * @returns {Promise<{
+ *   result: import('../types.js').AiDiagnosisResult,
+ *   usedFallback: boolean,
+ *   fallbackReasonCode: AiErrorCode | 'NO_API_KEY' | null,
+ *   fallbackReasonText: string | null,
+ *   fallbackNotice: string | null
+ * }>}
+ */
+export async function generateSampleAiWithFallback(params) {
+  const provider =
+    params.provider || getProviderById(params.providerId || 'deepseek', params.customProviders || []);
+  const trimmedKey = String(params.apiKey || '').trim();
+
+  if (!trimmedKey) {
+    const fallbackReasonText = '未配置 Key';
+    const fallbackNotice = `未配置 Key（当前服务商：${provider.name}），无法发起实时 AI 生成，已自动回退展示预先生成的示例 AI 诊断。`;
+    return {
+      result: {
+        ...params.fallbackDiagnosis,
+        fallbackNotice,
+      },
+      usedFallback: true,
+      fallbackReasonCode: 'NO_API_KEY',
+      fallbackReasonText,
+      fallbackNotice,
+    };
+  }
+
+  try {
+    const liveResult = await requestLiveAiDiagnosis({
+      provider,
+      model: params.model,
+      apiKey: trimmedKey,
+      metrics: params.metrics,
+      diagnosis: params.diagnosis,
+      fetchImpl: params.fetchImpl,
+      signal: params.signal,
+      timeoutMs: params.timeoutMs,
+    });
+    return {
+      result: liveResult,
+      usedFallback: false,
+      fallbackReasonCode: null,
+      fallbackReasonText: null,
+      fallbackNotice: null,
+    };
+  } catch (err) {
+    // 用户主动取消请求时向上抛出 AbortError，由界面保留当前展示并提示已取消
+    if (err && typeof err === 'object' && /** @type {any} */ (err).name === 'AbortError') {
+      throw err;
+    }
+
+    const aiErr =
+      err instanceof AiClientError
+        ? err
+        : new AiClientError('CORS_OR_NETWORK', err instanceof Error ? err.message : String(err));
+    const shortLabel = AI_ERROR_SHORT_LABELS[aiErr.code];
+    const fallbackReasonText = `${shortLabel}：${aiErr.message}`;
+    const fallbackNotice = `实时 AI 生成失败（${shortLabel}：${aiErr.message}），已自动回退展示预先生成的示例 AI 诊断。`;
+
+    return {
+      result: {
+        ...params.fallbackDiagnosis,
+        fallbackNotice,
+      },
+      usedFallback: true,
+      fallbackReasonCode: aiErr.code,
+      fallbackReasonText,
+      fallbackNotice,
+    };
+  }
+}
+
+const MODELS_UNSUPPORTED_STATUSES = new Set([400, 404, 405, 422, 501]);
+
+/**
+ * R4：服务商轻量连通性测试。
+ * 优先请求 `GET {baseUrl}/models`；若服务商不支持 `/models`（如 404/405/501/400/422 或非 JSON 响应），
+ * 自动回退为 `POST {baseUrl}/chat/completions`（`max_tokens: 1`）。
+ * 成功时报告毫秒级耗时；失败时映射到既有 6 类中文错误分类。
+ *
+ * @param {{
+ *   provider?: import('./providers.js').AiProviderConfig,
+ *   providerId?: string,
+ *   customProviders?: import('../types.js').CustomAiProvider[],
+ *   model?: string,
+ *   apiKey: string,
+ *   fetchImpl?: typeof fetch,
+ *   signal?: AbortSignal,
+ *   timeoutMs?: number,
+ *   nowFn?: () => number
+ * }} params
+ * @returns {Promise<import('../types.js').ProviderConnectivityResult>}
+ */
+export async function testProviderConnectivity(params) {
+  const provider =
+    params.provider || getProviderById(params.providerId || 'deepseek', params.customProviders || []);
+  const model = (params.model || provider.defaultModel).trim();
+  const apiKey = String(params.apiKey || '').trim();
+  const fetchFn = params.fetchImpl ?? globalThis.fetch;
+  const nowFn = params.nowFn ?? (() => Date.now());
+  const startedAt = nowFn();
+
+  if (!apiKey) {
+    return {
+      ok: false,
+      method: 'none',
+      latencyMs: 0,
+      testedAtUtcMs: Date.now(),
+      errorCode: 'AUTH_INVALID',
+      message: `未配置 API Key：${AI_ERROR_MESSAGES.AUTH_INVALID}`,
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = params.timeoutMs ?? CONNECTIVITY_TIMEOUT_MS;
+  let timedOut = false;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onExternalAbort = () => controller.abort();
+  if (params.signal) {
+    if (params.signal.aborted) {
+      clearTimeout(timer);
+      throw new DOMException('已取消连通性测试', 'AbortError');
+    }
+    params.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  /** @param {'models'|'chat_fallback'} method @param {AiClientError} aiErr */
+  const makeFail = (method, aiErr) => ({
+    ok: false,
+    method,
+    latencyMs: Math.max(0, Math.round(nowFn() - startedAt)),
+    testedAtUtcMs: Date.now(),
+    errorCode: aiErr.code,
+    message: aiErr.message,
+  });
+
+  /** @type {'models'|'chat_fallback'} */
+  let currentMethod = 'models';
+
+  try {
+    // 1. 优先尝试 GET {baseUrl}/models
+    const modelsResp = await fetchFn(`${provider.baseUrl}/models`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: controller.signal,
+    });
+
+    if (modelsResp.ok) {
+      let jsonOk = false;
+      try {
+        const data = await modelsResp.json();
+        jsonOk = Boolean(data && typeof data === 'object');
+      } catch {
+        jsonOk = false;
+      }
+      if (jsonOk) {
+        const latencyMs = Math.max(0, Math.round(nowFn() - startedAt));
+        return {
+          ok: true,
+          method: 'models',
+          latencyMs,
+          testedAtUtcMs: Date.now(),
+          errorCode: null,
+          message: `连通性验证通过（GET /models，耗时 ${latencyMs} ms）`,
+        };
+      }
+      // 200 但返回非 JSON（如反代 HTML 页），回退到 chat/completions 验证
+    } else {
+      let errText = '';
+      try {
+        errText = await modelsResp.text();
+      } catch {
+        // ignore
+      }
+      // 若为明确鉴权失败或额度耗尽，无需回退直接返回分类错误
+      if (!MODELS_UNSUPPORTED_STATUSES.has(modelsResp.status)) {
+        return makeFail('models', classifyHttpError(modelsResp.status, errText));
+      }
+      // 若 400 响应体明确为 quota 耗尽，也不必回退
+      const lowerErr = errText.toLowerCase();
+      if (lowerErr.includes('insufficient_quota') || lowerErr.includes('quota')) {
+        return makeFail('models', new AiClientError('QUOTA_EXCEEDED', `HTTP ${modelsResp.status}`));
+      }
+    }
+
+    // 2. 回退：最小化 POST {baseUrl}/chat/completions (max_tokens=1)
+    currentMethod = 'chat_fallback';
+    const chatResp = await fetchFn(`${provider.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1,
+        temperature: 0,
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!chatResp.ok) {
+      let errText = '';
+      try {
+        errText = await chatResp.text();
+      } catch {
+        // ignore
+      }
+      return makeFail('chat_fallback', classifyHttpError(chatResp.status, errText));
+    }
+
+    let chatJson;
+    try {
+      chatJson = await chatResp.json();
+    } catch {
+      return makeFail('chat_fallback', new AiClientError('PARSE_ERROR', '响应体非 JSON'));
+    }
+
+    if (!chatJson || !Array.isArray(chatJson.choices)) {
+      return makeFail('chat_fallback', new AiClientError('PARSE_ERROR', '缺少 choices 字段'));
+    }
+
+    const latencyMs = Math.max(0, Math.round(nowFn() - startedAt));
+    return {
+      ok: true,
+      method: 'chat_fallback',
+      latencyMs,
+      testedAtUtcMs: Date.now(),
+      errorCode: null,
+      message: `连通性验证通过（chat/completions 轻量回退，耗时 ${latencyMs} ms）`,
+    };
+  } catch (err) {
+    if (err instanceof AiClientError) {
+      return makeFail(currentMethod, err);
+    }
+    if (err && typeof err === 'object' && /** @type {any} */ (err).name === 'AbortError') {
+      if (timedOut) {
+        return makeFail(currentMethod, new AiClientError('TIMEOUT', 'timeout'));
+      }
+      throw err;
+    }
+    return makeFail(
+      currentMethod,
+      new AiClientError('CORS_OR_NETWORK', err instanceof Error ? err.message : String(err)),
+    );
   } finally {
     clearTimeout(timer);
     if (params.signal) {

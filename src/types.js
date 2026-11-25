@@ -261,6 +261,32 @@
  * @property {string[]} commentReinterpretation
  * @property {AiRewriteSuggestion[]} rewriteSuggestions
  * @property {AiVerificationReport} verification
+ * @property {string|null} [fallbackNotice]
+ */
+
+/**
+ * @typedef {'preflight_passed'|'unverified'} BrowserCorsStatus
+ */
+
+/**
+ * @typedef {Object} CustomAiProvider
+ * @property {string} id
+ * @property {string} name
+ * @property {string} host
+ * @property {string} baseUrl
+ * @property {string} defaultModel
+ * @property {'unverified'} browserCorsStatus
+ * @property {true} isCustom
+ */
+
+/**
+ * @typedef {Object} ProviderConnectivityResult
+ * @property {boolean} ok
+ * @property {'models'|'chat_fallback'|'none'} method
+ * @property {number} latencyMs
+ * @property {number} testedAtUtcMs
+ * @property {string|null} errorCode
+ * @property {string} message
  */
 
 /**
@@ -271,13 +297,15 @@
  * @property {string} aiProviderId
  * @property {string} aiModel
  * @property {boolean} rememberApiKey
+ * @property {CustomAiProvider[]} [customProviders]
+ * @property {Record<string, ProviderConnectivityResult>} [connectivityResults]
  */
 
 /**
  * @typedef {Object} ReportModel
  * @property {{reviewId:string, createdAtUtcMs:number, asOfUtcMs:number, asOfDisplay:string, engineVersion:string, isSample:boolean, itemCount:number, earliestDate:string|null, latestDate:string|null, spanDays:number|null, ageThresholdDays:number, smallSampleThreshold:number}} meta
  * @property {{headline:string, disclaimer:string, sampleNotice:string|null, historyComparisonNote:string|null, weightedEngagementRate:string, medianEngagementRate:string, engagementSpreadPp:string|null}} summary
- * @property {Array<{blockIndex:number, title:string, publishedRaw:string, ageDays:number|null, ageText:string, views:number, upvotes:number, collects:number, comments:number, endorseLikes:number|null, shares:number|null, categoryTag:string|null, upvoteRate:string, collectRate:string, commentRate:string, engagementRate:string, collectUpvoteRatio:string, isSmallSample:boolean, isImmature:boolean, rank:number}>} overviewRows
+ * @property {Array<{blockIndex:number, title:string, publishedRaw:string, ageDays:number|null, ageText:string, views:number, upvotes:number, collects:number, comments:number, endorseLikes:number|null, shares:number|null, categoryTag:string|null, categoryReferenceNote?:string|null, upvoteRate:string, collectRate:string, commentRate:string, engagementRate:string, collectUpvoteRatio:string, isSmallSample:boolean, isImmature:boolean, rank:number}>} overviewRows
  * @property {{views:number, upvotes:number, collects:number, comments:number, interactions:number, endorseLikes:number, shares:number, hasEndorseLikes:boolean, hasShares:boolean, weightedEngagementRate:string}} totals
  * @property {string[]} formulasNote
  * @property {boolean} canRank

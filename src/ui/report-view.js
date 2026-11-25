@@ -3,18 +3,19 @@
 import { el, showManualCopyModal, showModal, showToast } from './dom.js';
 import { serializeReportToMarkdown } from '../core/report.js';
 import { formatPercent } from '../core/round.js';
+import { formatUtcMinute, localDateToWallUtcMs } from '../core/date.js';
 import {
   copyTextWithFallback,
   downloadTextFile,
   makeMarkdownFilename,
 } from '../storage/backup.js';
-import { getProviderById } from '../ai/providers.js';
+import { getProviderCorsStatusLabel } from '../ai/providers.js';
 import { buildConsentMessage } from '../ai/prompt.js';
 import { splitTextWithUnverifiedMarks } from '../ai/verifier.js';
 import { AiClientError } from '../ai/client.js';
 
 /**
- * 复盘报告视图（详细设计 §4.1、§5.6、§6.1、§6.3、§6.4、§7）
+ * 复盘报告视图（详细设计 §4.1、§5.6、§6.1、§6.3、§6.4、§7、§10）
  * 严格消费单一 ReportModel，保证屏幕渲染与导出 Markdown 数字 100% 一致。
  */
 
@@ -55,16 +56,25 @@ function priorityClass(priority) {
  * @param {{
  *   report: import('../types.js').ReportModel|null,
  *   settings: import('../types.js').Settings,
+ *   activeProvider: import('../ai/providers.js').AiProviderConfig,
  *   hasApiKey: boolean,
  *   canRunLiveAi: boolean,
  *   onGoWorkspace: () => void,
  *   onGoSettings: () => void,
- *   onRunLiveAi: (signal: AbortSignal, tempKey?: string) => Promise<void>
+ *   onTestConnectivity: () => Promise<import('../types.js').ProviderConnectivityResult>,
+ *   onRunLiveAi: (signal: AbortSignal, tempKey?: string) => Promise<void>,
+ *   onRegenerateSampleAi: (signal: AbortSignal, tempKey?: string) => Promise<{
+ *     result: import('../types.js').AiDiagnosisResult,
+ *     usedFallback: boolean,
+ *     fallbackReasonCode: string | null,
+ *     fallbackReasonText: string | null,
+ *     fallbackNotice: string | null
+ *   }>
  * }} props
  * @returns {HTMLElement}
  */
 export function renderReportView(props) {
-  const { report } = props;
+  const { report, activeProvider } = props;
   if (!report) {
     return el('section', { className: 'card empty-state-card' }, [
       el('h2', { className: 'section-title' }, ['尚未生成本次复盘报告']),
@@ -80,6 +90,10 @@ export function renderReportView(props) {
   }
 
   const root = el('div', { className: 'report-view' });
+  const provider = activeProvider;
+  const activeModel = props.settings.aiModel || provider.defaultModel;
+  const lastConn = props.settings.connectivityResults?.[provider.id] || null;
+  const corsLabel = getProviderCorsStatusLabel(provider, lastConn);
 
   // 状态徽标栏
   const hasImmature = report.overviewRows.some((r) => r.isImmature);
@@ -125,8 +139,75 @@ export function renderReportView(props) {
   /** @type {AbortController|null} */
   let activeAiAbort = null;
 
+  // R1：内置示例报告“重新生成 AI 诊断”（支持无 Key / 超时 / 6 类错误自动回退至预生成示例并明示原因）
+  const executeSampleRegenerate = async (tempKey = '') => {
+    activeAiAbort = new AbortController();
+    aiStatusBox.replaceChildren(
+      el('div', { className: 'ai-loading-bar' }, [
+        el('span', {}, [`正在尝试由 ${provider.name} 实时重新生成示例 AI 诊断（最长 30 秒，失败将自动回退预生成示例）…`]),
+        el(
+          'button',
+          {
+            type: 'button',
+            className: 'btn btn-ghost btn-sm',
+            onClick: () => {
+              activeAiAbort?.abort();
+              aiStatusBox.replaceChildren(
+                el('div', { className: 'alert-box alert-info' }, ['已取消本次实时生成，当前继续展示示例 AI 诊断。']),
+              );
+            },
+          },
+          ['取消请求'],
+        ),
+      ]),
+    );
+
+    try {
+      const outcome = await props.onRegenerateSampleAi(activeAiAbort.signal, tempKey);
+      if (outcome.usedFallback) {
+        showToast(`已回退预生成示例（${outcome.fallbackReasonText || '调用失败'}）`, 'warning', 4500);
+      } else {
+        showToast(`实时 AI 诊断已由 ${provider.name} 重新生成并完成数字核验`, 'success');
+      }
+    } catch (err) {
+      if (err && typeof err === 'object' && /** @type {any} */ (err).name === 'AbortError') {
+        return;
+      }
+      showToast('实时生成异常，已保留预先生成的示例 AI 诊断', 'warning', 4000);
+    } finally {
+      activeAiAbort = null;
+    }
+  };
+
+  const handleRegenerateSampleAiClick = async () => {
+    if (!props.canRunLiveAi) {
+      showToast('请先在工作台生成示例报告后再尝试重新生成 AI 诊断', 'warning');
+      return;
+    }
+    // 无 Key 时直接走自动回退，不阻断也不弹窗拦截，清晰展示“未配置 Key”回退提示
+    if (!props.hasApiKey) {
+      await executeSampleRegenerate('');
+      return;
+    }
+    const consentText = buildConsentMessage(provider);
+    showModal({
+      title: '数据发送确认（重新生成示例 AI 诊断）',
+      body: el('div', {}, [
+        el('p', {}, [consentText]),
+        el('p', { className: 'muted-text small-note' }, [
+          `目标模型：${activeModel}；若请求超时或调用失败，系统将自动回退至预先生成的示例 AI 诊断并说明原因，绝不阻塞确定性报告。`,
+        ]),
+      ]),
+      confirmText: '确认并实时生成',
+      cancelText: '取消',
+      onConfirm: async () => {
+        await executeSampleRegenerate('');
+      },
+    });
+  };
+
+  // 非示例报告：BYOK 实时 AI 诊断流程
   const triggerLiveAiFlow = (tempKey = '') => {
-    const provider = getProviderById(props.settings.aiProviderId);
     const consentText = buildConsentMessage(provider);
 
     showModal({
@@ -134,7 +215,7 @@ export function renderReportView(props) {
       body: el('div', {}, [
         el('p', {}, [consentText]),
         el('p', { className: 'muted-text small-note' }, [
-          `目标模型：${props.settings.aiModel || provider.defaultModel}；所有指标数字均由本地引擎算好后传入，大模型返回后将再次进行确定性数字核验。`,
+          `目标模型：${activeModel}；所有指标数字均由本地引擎算好后传入，大模型返回后将再次进行确定性数字核验。`,
         ]),
       ]),
       confirmText: '确认并分析',
@@ -203,7 +284,6 @@ export function renderReportView(props) {
       triggerLiveAiFlow();
       return;
     }
-    // 未配置 Key 时弹窗允许临时填入或跳转设置
     const tempKeyInput = /** @type {HTMLInputElement} */ (
       el('input', {
         type: 'password',
@@ -219,7 +299,7 @@ export function renderReportView(props) {
           '实时 AI 深度诊断采用“用户自备 Key 浏览器直连”模式，请求不经过我方服务器。您可在此临时输入 Key，或前往“设置与备份”配置服务商与模型。',
         ]),
         el('label', { className: 'form-field' }, [
-          el('span', {}, [`临时 API Key（当前服务商：${getProviderById(props.settings.aiProviderId).name}）`]),
+          el('span', {}, [`临时 API Key（当前服务商：${provider.name}）`]),
           tempKeyInput,
         ]),
         el(
@@ -245,6 +325,28 @@ export function renderReportView(props) {
     });
   };
 
+  const topAiActionBtn = report.meta.isSample
+    ? el(
+        'button',
+        {
+          type: 'button',
+          id: 'run-live-ai-btn',
+          className: 'btn btn-outline',
+          onClick: handleRegenerateSampleAiClick,
+        },
+        ['重新生成 AI 诊断'],
+      )
+    : el(
+        'button',
+        {
+          type: 'button',
+          id: 'run-live-ai-btn',
+          className: 'btn btn-outline',
+          onClick: handleRunLiveAiClick,
+        },
+        [report.aiSection?.mode === 'live_byok' ? '重新运行实时 AI 诊断' : '运行实时 AI 深度诊断（BYOK）'],
+      );
+
   const topActionCard = el('section', { className: 'card report-toolbar-card' }, [
     el('div', { className: 'badge-row' }, badges),
     el('div', { className: 'action-btn-group' }, [
@@ -258,11 +360,7 @@ export function renderReportView(props) {
         { type: 'button', id: 'copy-md-btn', className: 'btn btn-secondary', onClick: handleCopyMd },
         ['复制 Markdown 全文'],
       ),
-      el(
-        'button',
-        { type: 'button', id: 'run-live-ai-btn', className: 'btn btn-outline', onClick: handleRunLiveAiClick },
-        [report.aiSection?.mode === 'live_byok' ? '重新运行实时 AI 诊断' : '运行实时 AI 深度诊断（BYOK）'],
-      ),
+      topAiActionBtn,
     ]),
   ]);
   root.appendChild(topActionCard);
@@ -359,7 +457,12 @@ export function renderReportView(props) {
   for (const row of report.overviewRows) {
     overviewCardsWrap.appendChild(
       el('div', { className: 'overview-mobile-card tabular-nums' }, [
-        el('div', { className: 'mobile-card-title' }, [row.title]),
+        el('div', { className: 'mobile-card-title' }, [
+          el('span', {}, [row.title]),
+          row.isSmallSample ? el('span', { className: 'mini-tag tag-amber' }, ['样本小']) : null,
+          row.isImmature ? el('span', { className: 'mini-tag tag-amber' }, ['数据龄不足']) : null,
+          row.categoryTag ? el('span', { className: 'mini-tag tag-blue' }, [row.categoryTag]) : null,
+        ]),
         el('div', { className: 'mobile-card-meta' }, [
           `发布：${row.publishedRaw} · 数据龄：${row.ageText}`,
         ]),
@@ -400,6 +503,8 @@ export function renderReportView(props) {
           .join('｜')}（不计入互动率）`
       : '';
 
+  const categoryRefItems = report.overviewRows.filter((r) => Boolean(r.categoryReferenceNote));
+
   const overviewSection = el('section', { className: 'card' }, [
     el('div', { className: 'card-header' }, [
       el('h2', { className: 'section-title' }, ['指标总览与计算口径']),
@@ -413,6 +518,16 @@ export function renderReportView(props) {
         ? `｜发布跨度 ${report.meta.spanDays} 天（${report.meta.earliestDate} 至 ${report.meta.latestDate}）`
         : '',
     ]),
+    categoryRefItems.length > 0
+      ? el('div', { className: 'alert-box alert-info small-alert' }, [
+          el('div', { className: 'alert-title' }, ['同类型历史中位参考']),
+          el(
+            'ul',
+            { className: 'plain-list' },
+            categoryRefItems.map((r) => el('li', {}, [`《${r.title}》：${r.categoryReferenceNote}`])),
+          ),
+        ])
+      : null,
     report.ageAndSampleWarnings.length > 0
       ? el('div', { className: 'alert-box alert-warning' }, [
           el('div', { className: 'alert-title' }, ['样本与数据龄提示']),
@@ -645,7 +760,94 @@ export function renderReportView(props) {
   trackingSection.appendChild(el('pre', { className: 'template-pre' }, [report.nextTemplate]));
   root.appendChild(trackingSection);
 
-  // 8. AI 深度语义诊断面板（D2 A′）
+  // 8. AI 深度语义诊断面板（D2 A′ + R1 重新生成与回退 + R4 连通性测试）
+  const reportTestConnBtn = /** @type {HTMLButtonElement} */ (
+    el(
+      'button',
+      {
+        type: 'button',
+        id: 'report-test-connectivity-btn',
+        className: 'btn btn-secondary btn-sm',
+        onClick: async () => {
+          reportTestConnBtn.disabled = true;
+          reportTestConnBtn.textContent = '正在测试连通性…';
+          try {
+            const res = await props.onTestConnectivity();
+            if (res.ok) {
+              showToast(`${provider.name} 连通性通过（耗时 ${res.latencyMs} ms）`, 'success', 4000);
+            } else {
+              showToast(`${provider.name} 连通性失败：${res.message}`, 'error', 5000);
+            }
+          } finally {
+            reportTestConnBtn.disabled = false;
+            reportTestConnBtn.textContent = '测试连通性';
+          }
+        },
+      },
+      ['测试连通性'],
+    )
+  );
+
+  const panelPrimaryAiBtn = report.meta.isSample
+    ? el(
+        'button',
+        {
+          type: 'button',
+          id: 'regenerate-sample-ai-btn',
+          className: 'btn btn-outline btn-sm',
+          onClick: handleRegenerateSampleAiClick,
+        },
+        ['重新生成 AI 诊断'],
+      )
+    : el(
+        'button',
+        {
+          type: 'button',
+          id: 'panel-run-live-ai-btn',
+          className: 'btn btn-outline btn-sm',
+          onClick: handleRunLiveAiClick,
+        },
+        [report.aiSection?.mode === 'live_byok' ? '重新运行实时 AI 诊断' : '运行实时 AI 诊断'],
+      );
+
+  const connStatusText = lastConn
+    ? lastConn.ok
+      ? `上次连通性测试（${formatUtcMinute(localDateToWallUtcMs(new Date(lastConn.testedAtUtcMs)))}）：成功 · ${lastConn.latencyMs} ms`
+      : `上次连通性测试（${formatUtcMinute(localDateToWallUtcMs(new Date(lastConn.testedAtUtcMs)))}）：失败 [${lastConn.errorCode || 'ERR'}] — ${lastConn.message}`
+    : '尚未执行连通性测试';
+
+  const aiControlsBar = el('div', { className: 'ai-panel-controls' }, [
+    el('div', { className: 'ai-provider-summary' }, [
+      el('div', { className: 'badge-row' }, [
+        el('span', { className: 'badge badge-neutral' }, [`当前服务商：${provider.name}（${activeModel}）`]),
+        el(
+          'span',
+          {
+            className: `badge ${lastConn?.ok ? 'badge-green' : provider.browserCorsStatus === 'preflight_passed' ? 'badge-blue' : 'badge-amber'}`,
+          },
+          [`直连状态：${corsLabel}`],
+        ),
+        el('span', { className: `badge ${props.hasApiKey ? 'badge-green-soft' : 'badge-neutral'}` }, [
+          props.hasApiKey ? 'Key 已配置' : '未配置 Key',
+        ]),
+      ]),
+      el('div', { className: 'muted-text small-note', id: 'report-connectivity-summary' }, [connStatusText]),
+    ]),
+    el('div', { className: 'action-btn-group' }, [
+      panelPrimaryAiBtn,
+      reportTestConnBtn,
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'btn btn-ghost btn-sm',
+          onClick: props.onGoSettings,
+        },
+        ['配置服务商 / Key'],
+      ),
+    ]),
+  ]);
+
   const aiSection = el('section', { className: 'card ai-panel', id: 'ai-diagnosis-panel' }, [
     el('div', { className: 'card-header' }, [
       el('h2', { className: 'section-title' }, ['AI 深度语义诊断']),
@@ -653,22 +855,44 @@ export function renderReportView(props) {
         ? el(
             'span',
             {
+              id: 'ai-mode-badge',
               className: `badge ${report.aiSection.mode === 'sample_pregenerated' ? 'badge-amber' : 'badge-green'}`,
             },
             [
               report.aiSection.mode === 'sample_pregenerated'
                 ? '预先生成示例（非实时）'
-                : `实时 BYOK · ${report.aiSection.providerName}`,
+                : `实时 AI 诊断 · ${report.aiSection.providerName}`,
             ],
           )
-        : el('span', { className: 'badge badge-neutral' }, ['未启用（可选）']),
+        : el('span', { id: 'ai-mode-badge', className: 'badge badge-neutral' }, ['未启用（可选）']),
     ]),
+    aiControlsBar,
     aiStatusBox,
   ]);
 
   if (report.aiSection) {
     const ai = report.aiSection;
     const unverified = ai.verification?.unverifiedTokens || [];
+
+    if (ai.fallbackNotice) {
+      aiSection.appendChild(
+        el('div', { className: 'alert-box alert-warning', id: 'sample-ai-fallback-notice', role: 'status' }, [
+          el('div', { className: 'alert-title' }, ['已自动回退至预先生成的示例 AI 诊断']),
+          el('p', {}, [ai.fallbackNotice]),
+          !props.hasApiKey
+            ? el(
+                'button',
+                {
+                  type: 'button',
+                  className: 'link-btn',
+                  onClick: props.onGoSettings,
+                },
+                ['前往“设置与备份”配置自有 API Key →'],
+              )
+            : null,
+        ]),
+      );
+    }
 
     aiSection.appendChild(
       el(
