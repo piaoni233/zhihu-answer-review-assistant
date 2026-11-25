@@ -1,0 +1,7 @@
+# Netlify 热备站配置：导入仓库时自动识别，无需手动填构建设置
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
